@@ -1,5 +1,5 @@
 import sqlite3
-import ollama
+
 
 # distance, time, traffic, difficulty
 graph = {
@@ -11,9 +11,6 @@ graph = {
     "F": {"D": (11, 15, 4, 3), "G": (6, 8, 2, 1)},
     "G": {"E": (8, 11, 3, 2), "F": (6, 8, 2, 1)}
 }
-
-
-# ---------------- DATABASE ----------------
 
 db = sqlite3.connect("navigator.db")
 cur = db.cursor()
@@ -27,15 +24,13 @@ CREATE TABLE IF NOT EXISTS routes(
     distance REAL,
     expected_time REAL,
     traffic REAL,
+    difficulty REAL,
     actual_time REAL,
     actual_distance REAL
 )
 """)
 
 db.commit()
-
-
-# ---------------- DIJKSTRA ----------------
 
 def dijkstra(start, finish):
     dist = {v: float("inf") for v in graph}
@@ -75,10 +70,6 @@ def dijkstra(start, finish):
 
     return route
 
-
-# ---------------- ALL ROUTES ----------------
-# Простая DFS для поиска альтернатив
-
 def find_all_routes(start, finish, route=None):
     if route is None:
         route = [start]
@@ -98,13 +89,11 @@ def find_all_routes(start, finish, route=None):
 
     return routes
 
-
-# ---------------- ROUTE INFO ----------------
-
 def route_info(route):
     distance = 0
     time = 0
     traffic = 0
+    difficulty = 0
 
     for i in range(len(route) - 1):
         road = graph[route[i]][route[i + 1]]
@@ -112,13 +101,16 @@ def route_info(route):
         distance += road[0]
         time += road[1]
         traffic += road[2]
+        difficulty += road[3]
 
-    traffic /= len(route) - 1
+    parts = len(route) - 1
 
-    return distance, time, traffic
-
-
-# ---------------- FIND ROUTE ----------------
+    return (
+        distance,
+        time,
+        traffic / parts,
+        difficulty / parts
+    )
 
 def find_route():
     start = input("Початкова точка: ").upper()
@@ -130,34 +122,30 @@ def find_route():
 
     best = dijkstra(start, finish)
 
-    print("\nDijkstra:")
+    print("\nDijkstra рекомендує:")
     print(" -> ".join(best))
 
-    # Находим все возможные маршруты
     routes = find_all_routes(start, finish)
 
-    # Сортируем по расстоянию
     routes.sort(key=lambda r: route_info(r)[0])
 
-    # Оставляем только первые 3
     routes = routes[:3]
 
     print("\nМожливі маршрути:")
 
     for i, route in enumerate(routes, 1):
-        distance, time, traffic = route_info(route)
+        distance, time, traffic, difficulty = route_info(route)
 
         print(
             f"{i}. {' -> '.join(route)} | "
             f"{distance} км | {time} хв"
         )
 
-    choice = int(
-        input("\nЯким маршрутом поїхали? ")
-    ) - 1
+    choice = int(input("\nЯким маршрутом поїхали? ")) - 1
 
     route = routes[choice]
-    distance, time, traffic = route_info(route)
+
+    distance, time, traffic, difficulty = route_info(route)
 
     cur.execute("""
         INSERT INTO routes(
@@ -166,16 +154,18 @@ def find_route():
             route,
             distance,
             expected_time,
-            traffic
+            traffic,
+            difficulty
         )
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
     """, (
         start,
         finish,
         ",".join(route),
         distance,
         time,
-        traffic
+        traffic,
+        difficulty
     ))
 
     db.commit()
@@ -183,8 +173,6 @@ def find_route():
     print("Маршрут збережено.")
     print("ID поїздки:", cur.lastrowid)
 
-
-# ---------------- ACTUAL RESULT ----------------
 
 def add_result():
     route_id = int(input("ID поїздки: "))
@@ -206,19 +194,29 @@ def add_result():
     print("Результат збережено.")
 
 
-# ---------------- HISTORY ----------------
-
 def history():
     rows = cur.execute("""
-        SELECT *
+        SELECT
+            id,
+            start,
+            finish,
+            route,
+            distance,
+            expected_time,
+            actual_time,
+            actual_distance
         FROM routes
     """).fetchall()
 
     for r in rows:
-        print(r)
+        print(
+            f"ID: {r[0]} | "
+            f"{r[1]} -> {r[2]} | "
+            f"{r[3].replace(',', ' -> ')} | "
+            f"прогноз: {r[5]} хв | "
+            f"факт: {r[6]}"
+        )
 
-
-# ---------------- STATISTICS ----------------
 
 def statistics():
     rows = cur.execute("""
@@ -227,12 +225,16 @@ def statistics():
             COUNT(*),
             AVG(expected_time),
             AVG(actual_time),
-            AVG(actual_distance)
+            AVG(actual_distance),
+            MIN(actual_time),
+            MAX(actual_time)
 
         FROM routes
 
         GROUP BY route
     """).fetchall()
+
+    print("\n===== СТАТИСТИКА =====")
 
     for r in rows:
         print("\nМаршрут:", r[0].replace(",", " -> "))
@@ -240,15 +242,18 @@ def statistics():
         print("Середній прогноз:", r[2])
         print("Середній факт:", r[3])
         print("Середня відстань:", r[4])
+        print("Найшвидший час:", r[5])
+        print("Найповільніший час:", r[6])
 
-
-# ---------------- AI ----------------
-
-def ai():
+def ai_recommendation():
     start = input("Початкова точка: ").upper()
     finish = input("Кінцева точка: ").upper()
 
-    best = dijkstra(start, finish)
+    if start not in graph or finish not in graph:
+        print("Невірна точка.")
+        return
+
+    dijkstra_route = dijkstra(start, finish)
 
     rows = cur.execute("""
         SELECT
@@ -259,8 +264,10 @@ def ai():
 
         FROM routes
 
-        WHERE start=? AND finish=?
-        AND actual_time IS NOT NULL
+        WHERE
+            start = ?
+            AND finish = ?
+            AND actual_time IS NOT NULL
 
         GROUP BY route
     """, (
@@ -268,71 +275,88 @@ def ai():
         finish
     )).fetchall()
 
-    if not rows:
-        print("Недостатньо історичних даних.")
-        return
+    print("\n===== АНАЛІЗ СИСТЕМИ =====")
 
-    text = ""
-
-    for r in rows:
-        text += (
-            f"Маршрут {r[0]}: "
-            f"{r[1]} поїздок, "
-            f"прогноз {r[2]:.1f} хв, "
-            f"факт {r[3]:.1f} хв.\n"
-        )
-
-    prompt = f"""
-/no_think
-
-Ти AI-аналітик навігатора.
-
-Dijkstra рекомендує:
-{" -> ".join(best)}
-
-Історія реальних поїздок:
-
-{text}
-
-Зроби короткий аналіз.
-
-Правила:
-1. Порівнюй маршрути за середнім фактичним часом.
-2. Якщо альтернативний маршрут фактично швидший,
-   рекомендуй його.
-3. Якщо маршрут Dijkstra найшвидший,
-   рекомендуй його.
-4. Якщо для маршруту менше 3 поїздок,
-   скажи, що даних ще мало.
-5. Не вигадуй маршрути та числа.
-6. Відповідай українською.
-
-Формат:
-
-Рекомендований маршрут:
-...
-
-Причина:
-...
-"""
-
-    response = ollama.chat(
-        model="qwen3:1.7b",
-        messages=[
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ]
+    print(
+        "Dijkstra:",
+        " -> ".join(dijkstra_route)
     )
 
-    print("\n===== AI =====")
-    print(response["message"]["content"])
+    if not rows:
+        print("Історичних даних поки немає.")
+        print("Рекомендація: використати маршрут Dijkstra.")
+        return
 
+    best_route = None
+    best_actual_time = float("inf")
 
-# ---------------- MENU ----------------
+    for route, count, expected, actual in rows:
+
+        difference = actual - expected
+        coefficient = actual / expected
+
+        print("\nМаршрут:", route.replace(",", " -> "))
+        print("Поїздок:", count)
+        print("Прогноз:", round(expected, 1), "хв")
+        print("Факт:", round(actual, 1), "хв")
+        print("Різниця:", round(difference, 1), "хв")
+        print("Коефіцієнт:", round(coefficient, 2))
+
+        if difference > 0:
+            percent = (coefficient - 1) * 100
+            print(
+                "Маршрут займає приблизно",
+                round(percent, 1),
+                "% більше часу, ніж прогноз."
+            )
+
+        elif difference < 0:
+            percent = (1 - coefficient) * 100
+            print(
+                "Маршрут проходиться приблизно",
+                round(percent, 1),
+                "% швидше за прогноз."
+            )
+
+        else:
+            print("Прогноз відповідає реальному часу.")
+
+        if actual < best_actual_time:
+            best_actual_time = actual
+            best_route = route
+
+    print("\n===== РЕКОМЕНДАЦІЯ =====")
+
+    if best_route is None:
+        print("Недостатньо даних для впевненої рекомендації.")
+        print(
+            "Поки що використовуйте:",
+            " -> ".join(dijkstra_route)
+        )
+
+    else:
+        print(
+            "Рекомендований маршрут:",
+            best_route.replace(",", " -> ")
+        )
+
+        print(
+            "Середній фактичний час:",
+            round(best_actual_time, 1),
+            "хв"
+        )
+
+        if best_route == ",".join(dijkstra_route):
+            print(
+                "Маршрут Dijkstra підтверджується історичними даними."
+            )
+        else:
+            print(
+                "За історичними даними цей маршрут швидший за стандартний маршрут Dijkstra."
+            )
 
 while True:
+
     print("""
 ===== AI NAVIGATOR =====
 
@@ -359,7 +383,7 @@ while True:
         statistics()
 
     elif choice == "5":
-        ai()
+        ai_recommendation()
 
     elif choice == "0":
         break
